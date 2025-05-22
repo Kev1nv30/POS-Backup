@@ -1,0 +1,1205 @@
+﻿using FerreteriaPOS.Data;
+using FerreteriaPOS.Data.Entities;
+using FerreteriaPOS.UI.Sprints;
+using FerreteriaPOS.UI.ViewModels;
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Windows;
+using System.Windows.Controls;
+using System.Windows.Input;
+
+namespace FerreteriaPOS.UI;
+
+/// <summary>
+/// Interaction logic for MainWindow.xaml
+/// </summary>
+public partial class MainWindow : Window
+{
+    private List<Producto> _productos;
+    private List<Producto> _productosFiltrados;
+    private List<Cliente> _clientes;
+    private List<Cliente> _clientesFiltrados;
+    private readonly FerreteriaContext _context;
+    private VentasViewModel _ventasViewModel;
+    private Window _paymentWindow;
+    private bool _isInPaymentScreen = false;
+    
+    // Comandos para teclas de función
+    public ICommand BuscarProductoCommand { get; private set; }
+    
+    // Identificador del contenido actualmente visible
+    private string _currentContent = "ventas";
+
+    public MainWindow()
+    {
+        InitializeComponent();
+
+        // Inicializar listas
+        _productos = new List<Producto>();
+        _productosFiltrados = new List<Producto>();
+        _clientes = new List<Cliente>();
+        _clientesFiltrados = new List<Cliente>();
+        
+        // Inicializar el contexto de datos
+        _context = new FerreteriaContext();
+        
+        // Inicializar el ViewModel de Ventas
+        _ventasViewModel = new VentasViewModel(_context);
+        
+        // Configurar los comandos
+        BuscarProductoCommand = new RelayCommand(_ => 
+        {
+            if (_currentContent == "ventas" && !_isInPaymentScreen)
+            {
+                BuscarProductoModal();
+            }
+        });
+        
+        // Establecer el DataContext para los comandos
+        this.DataContext = this;
+        
+        // Inicializar los elementos de la vista de ventas
+        InitializeVentasView();
+        
+        // Asegurarse de que el contenido de Ventas está visible por defecto
+        ShowVentasContent();
+        
+        // Marcar el botón F1 como seleccionado
+        SetActiveButton(btnF1Ventas);
+    }
+    
+    private void InitializeVentasView()
+    {
+        // Configurar DataContext
+        ventasContent.DataContext = _ventasViewModel;
+        
+        // Inicializar el TextBlock del cliente seleccionado
+        if (_ventasViewModel.ClienteSeleccionado != null)
+        {
+            txtClienteSeleccionado.Text = _ventasViewModel.ClienteSeleccionado.Nombre;
+        }
+        else
+        {
+            txtClienteSeleccionado.Text = "(Sin cliente)";
+        }
+        
+        // Enlazar propiedades
+        chkEsFactura.DataContext = _ventasViewModel;
+        chkEsFactura.SetBinding(CheckBox.IsCheckedProperty, new System.Windows.Data.Binding("EsFactura") { Mode = System.Windows.Data.BindingMode.TwoWay });
+        
+        // Cuando se marca la casilla
+        chkEsFactura.Checked += (s, e) => _ventasViewModel.EsFactura = true;
+        
+        // Cuando se desmarca la casilla, también limpiar el cliente seleccionado
+        chkEsFactura.Unchecked += (s, e) => 
+        {
+            _ventasViewModel.EsFactura = false;
+            _ventasViewModel.ClienteSeleccionado = null;
+            txtClienteSeleccionado.Text = "(Sin cliente)";
+            txtStatus.Text = "Factura desmarcada, cliente eliminado";
+        };
+        
+        // Enlazar propiedades numéricas - configurar con bindings explícitos
+        var subtotalBinding = new System.Windows.Data.Binding("Subtotal")
+        {
+            Source = _ventasViewModel,
+            StringFormat = "${0:#,##0}",
+            Mode = System.Windows.Data.BindingMode.OneWay,
+            UpdateSourceTrigger = System.Windows.Data.UpdateSourceTrigger.PropertyChanged
+        };
+        txtVentaSubtotal.SetBinding(TextBlock.TextProperty, subtotalBinding);
+        
+        var totalBinding = new System.Windows.Data.Binding("Total")
+        {
+            Source = _ventasViewModel,
+            StringFormat = "${0:#,##0}",
+            Mode = System.Windows.Data.BindingMode.OneWay,
+            UpdateSourceTrigger = System.Windows.Data.UpdateSourceTrigger.PropertyChanged
+        };
+        txtVentaTotal.SetBinding(TextBlock.TextProperty, totalBinding);
+        
+        // Enlazar la propiedad DataGrid
+        dgVentaItems.ItemsSource = _ventasViewModel.Items;
+        
+        // Forzar el cálculo inicial de totales para asegurar consistencia
+        _ventasViewModel.PropertyChanged += (sender, e) => 
+        {
+            // Depuración para ver cuando cambian las propiedades
+            if (e.PropertyName == "Subtotal" || e.PropertyName == "Total" || e.PropertyName == "Iva")
+            {
+                System.Diagnostics.Debug.WriteLine($"Propiedad cambiada: {e.PropertyName}, Valor: {GetPropertyValue(_ventasViewModel, e.PropertyName)}");
+            }
+            
+            if (e.PropertyName == "ClienteSeleccionado")
+            {
+                if (_ventasViewModel.ClienteSeleccionado != null)
+                {
+                    txtClienteSeleccionado.Text = _ventasViewModel.ClienteSeleccionado.Nombre;
+                }
+                else
+                {
+                    txtClienteSeleccionado.Text = "(Sin cliente)";
+                }
+            }
+        };
+    }
+
+    // Método auxiliar para obtener el valor de una propiedad
+    private object GetPropertyValue(object obj, string propertyName)
+    {
+        var property = obj.GetType().GetProperty(propertyName);
+        return property?.GetValue(obj, null);
+    }
+
+    private void Window_Loaded(object sender, RoutedEventArgs e)
+    {
+        try
+        {
+            // Cargar productos
+            Sprint3_Productos.CargarProductos(_context, ref _productos, ref _productosFiltrados, dgProductos, txtStatus, txtProductCount);
+            
+            // Cargar clientes
+            Sprint1_Clientes.CargarClientes(_context, ref _clientes, ref _clientesFiltrados, dgClientes, txtStatus, txtClienteCount);
+            
+            // Mensaje en la barra de estado
+            txtStatus.Text = "Aplicación cargada correctamente";
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show($"Error al cargar la aplicación: {ex.Message}", 
+                "Error", MessageBoxButton.OK, MessageBoxImage.Error);
+            txtStatus.Text = $"Error: {ex.Message}";
+        }
+    }
+    
+    #region Funcionalidad común
+    
+    private void Window_PreviewKeyDown(object sender, KeyEventArgs e)
+    {
+        // Prevent F10 from activating the menu (default Windows behavior)
+        if (e.Key == Key.F10)
+        {
+            // Siempre manejar F10 sin importar el contenido actual
+            if (!_isInPaymentScreen)
+            {
+                // Buscar productos para ventas
+                txtStatus.Text = "F10 presionado: Abriendo búsqueda de productos";
+                BuscarProductoModal();
+            }
+            e.Handled = true;
+            return;
+        }
+
+        // Debugging info for key presses
+        txtStatus.Text = $"Tecla: {e.Key}, Contenido actual: {_currentContent}";
+
+        if (e.Key == Key.F1)
+        {
+            if (_isInPaymentScreen)
+            {
+                // En pantalla de pago: Confirmar y imprimir
+                ConfirmarVentaConImpresion();
+            }
+            else
+            {
+                // Normal: Mostrar ventas
+                ShowVentasContent();
+                SetActiveButton(btnF1Ventas);
+            }
+            e.Handled = true;
+        }
+        else if (e.Key == Key.F2)
+        {
+            if (_isInPaymentScreen)
+            {
+                // En pantalla de pago: Confirmar sin imprimir
+                ConfirmarVentaSinImpresion();
+            }
+            else
+            {
+                // Normal: Mostrar clientes
+                ShowClientesContent();
+                SetActiveButton(btnF2Clientes);
+            }
+            e.Handled = true;
+        }
+        else if (e.Key == Key.F3 && btnF3Productos.IsEnabled)
+        {
+            // Mostrar contenido de Productos
+            ShowProductosContent();
+            SetActiveButton(btnF3Productos);
+            e.Handled = true;
+        }
+        else if (e.Key == Key.F4 && btnF4Inventario.IsEnabled)
+        {
+            // Mostrar contenido de Inventario cuando esté implementado
+            SetActiveButton(btnF4Inventario);
+            e.Handled = true;
+        }
+        else if (e.Key == Key.F5 && btnF5Configuracion.IsEnabled)
+        {
+            // Mostrar contenido de Configuración cuando esté implementado
+            SetActiveButton(btnF5Configuracion);
+            e.Handled = true;
+        }
+        else if (e.Key == Key.F6 && _currentContent == "ventas")
+        {
+            // Poner venta en espera
+            if (_ventasViewModel.Items.Count > 0)
+            {
+                btnHold_Click(null, null);
+            }
+            e.Handled = true;
+        }
+        else if (e.Key == Key.F12 && _currentContent == "ventas")
+        {
+            // Iniciar proceso de cobro
+            if (_ventasViewModel.Items.Count > 0)
+            {
+                MostrarPantallaCobro();
+            }
+            e.Handled = true;
+        }
+        else if (e.Key == Key.OemPlus || e.Key == Key.Add)
+        {
+            // Incrementar cantidad del producto seleccionado
+            if (_currentContent == "ventas" && _ventasViewModel.ItemSeleccionado != null)
+            {
+                _ventasViewModel.ItemSeleccionado.Cantidad++;
+            }
+            e.Handled = true;
+        }
+        else if (e.Key == Key.OemMinus || e.Key == Key.Subtract)
+        {
+            // Decrementar cantidad del producto seleccionado
+            if (_currentContent == "ventas" && _ventasViewModel.ItemSeleccionado != null && _ventasViewModel.ItemSeleccionado.Cantidad > 1)
+            {
+                _ventasViewModel.ItemSeleccionado.Cantidad--;
+            }
+            e.Handled = true;
+        }
+        else if (e.Key == Key.Delete)
+        {
+            // Eliminar productos de abajo hacia arriba sin necesidad de seleccionarlos
+            if (_currentContent == "ventas" && _ventasViewModel.Items.Count > 0)
+            {
+                // Obtener el último producto de la lista
+                var ultimoItem = _ventasViewModel.Items.LastOrDefault();
+                if (ultimoItem != null)
+                {
+                    _ventasViewModel.QuitarItemCommand.Execute(ultimoItem);
+                    txtStatus.Text = $"Producto eliminado: {ultimoItem.Producto.Descripcion}";
+                }
+            }
+            e.Handled = true;
+        }
+        else if (e.Key == Key.Escape)
+        {
+            // Cancelar operación en curso
+            if (_isInPaymentScreen)
+            {
+                // Si estamos en pantalla de pago, cerrar la ventana de pago
+                CerrarPantallaCobro();
+            }
+            e.Handled = true;
+        }
+    }
+    
+    private void ShowVentasContent()
+    {
+        // Ocultar otros contenidos y mostrar el de ventas
+        productosContent.Visibility = Visibility.Collapsed;
+        clientesContent.Visibility = Visibility.Collapsed;
+        ventasContent.Visibility = Visibility.Visible;
+        
+        // Actualizar el estado actual
+        _currentContent = "ventas";
+        txtStatus.Text = "Vista de Ventas";
+    }
+    
+    private void ShowProductosContent()
+    {
+        // Ocultar otros contenidos y mostrar el de productos
+        ventasContent.Visibility = Visibility.Collapsed;
+        clientesContent.Visibility = Visibility.Collapsed;
+        productosContent.Visibility = Visibility.Visible;
+        
+        // Actualizar el estado actual
+        _currentContent = "productos";
+        txtStatus.Text = "Vista de Productos";
+    }
+    
+    private void ShowClientesContent()
+    {
+        // Ocultar otros contenidos y mostrar el de clientes
+        ventasContent.Visibility = Visibility.Collapsed;
+        productosContent.Visibility = Visibility.Collapsed;
+        clientesContent.Visibility = Visibility.Visible;
+        
+        // Actualizar el estado actual
+        _currentContent = "clientes";
+        txtStatus.Text = "Vista de Clientes";
+    }
+    
+    private void SetActiveButton(Button activeButton)
+    {
+        Button[] allButtons = { btnF1Ventas, btnF2Clientes, btnF3Productos, btnF4Inventario, btnF5Configuracion };
+        Utils.SetActiveButton(activeButton, allButtons);
+    }
+    
+    private void btnF1Ventas_Click(object sender, RoutedEventArgs e)
+    {
+        ShowVentasContent();
+        SetActiveButton(btnF1Ventas);
+    }
+    
+    private void btnF2Clientes_Click(object sender, RoutedEventArgs e)
+    {
+        ShowClientesContent();
+        SetActiveButton(btnF2Clientes);
+    }
+    
+    private void btnF3Productos_Click(object sender, RoutedEventArgs e)
+    {
+        ShowProductosContent();
+        SetActiveButton(btnF3Productos);
+    }
+    
+    private void btnF4Inventario_Click(object sender, RoutedEventArgs e)
+    {
+        // Implementar cuando el módulo de inventario esté disponible
+        MessageBox.Show("El módulo de Inventario estará disponible próximamente.", "En desarrollo", MessageBoxButton.OK, MessageBoxImage.Information);
+    }
+    
+    private void btnF5Configuracion_Click(object sender, RoutedEventArgs e)
+    {
+        // Implementar cuando el módulo de configuración esté disponible
+        MessageBox.Show("El módulo de Configuración estará disponible próximamente.", "En desarrollo", MessageBoxButton.OK, MessageBoxImage.Information);
+    }
+    
+    #endregion
+
+    #region Eventos de Ventas
+    
+    private void txtBuscarVentaProducto_KeyDown(object sender, KeyEventArgs e)
+    {
+        if (e.Key == Key.Enter)
+        {
+            BuscarProductoParaVenta();
+            e.Handled = true;
+        }
+    }
+    
+    private void btnBuscarVentaProducto_Click(object sender, RoutedEventArgs e)
+    {
+        BuscarProductoModal();
+    }
+    
+    private void btnBuscarVentaCliente_Click(object sender, RoutedEventArgs e)
+    {
+        MostrarSelectorClientes();
+    }
+    
+    private void dgVentaItems_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        _ventasViewModel.ItemSeleccionado = dgVentaItems.SelectedItem as VentaItemViewModel;
+    }
+    
+    private void btnEliminarVentaItem_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is Button button && button.Tag is VentaItemViewModel item)
+        {
+            _ventasViewModel.QuitarItemCommand.Execute(item);
+        }
+    }
+    
+    private void btnNuevaVenta_Click(object sender, RoutedEventArgs e)
+    {
+        // Si hay productos en la venta actual, pedir confirmación
+        if (_ventasViewModel.Items.Count > 0)
+        {
+            var resultado = MessageBox.Show("¿Está seguro de cancelar la venta actual?", 
+                "Confirmar cancelación", MessageBoxButton.YesNo, MessageBoxImage.Question);
+                
+            if (resultado != MessageBoxResult.Yes)
+            {
+                return;
+            }
+        }
+        
+        // Limpiar la venta directamente sin mostrar otra confirmación
+        _ventasViewModel.LimpiarVentaCommand.Execute(null);
+        
+        // Limpiar también el cliente seleccionado
+        _ventasViewModel.ClienteSeleccionado = null;
+        txtClienteSeleccionado.Text = "(Sin cliente)";
+        
+        // Desmarcar la opción de factura
+        chkEsFactura.IsChecked = false;
+    }
+    
+    private void btnGuardarVenta_Click(object sender, RoutedEventArgs e)
+    {
+        _ventasViewModel.GuardarVentaCommand.Execute(null);
+    }
+    
+    private void btnHold_Click(object sender, RoutedEventArgs e)
+    {
+        if (_ventasViewModel.Items.Count == 0)
+        {
+            MessageBox.Show("No hay items en la venta actual.", "Aviso", MessageBoxButton.OK, MessageBoxImage.Warning);
+            return;
+        }
+        
+        _ventasViewModel.PausarVentaCommand.Execute(null);
+    }
+    
+    private void btnRecuperar_Click(object sender, RoutedEventArgs e)
+    {
+        MostrarVentasEnEspera();
+    }
+    
+    private void btnEmitir_Click(object sender, RoutedEventArgs e)
+    {
+        if (_ventasViewModel.Items.Count == 0)
+        {
+            MessageBox.Show("No hay items en la venta actual.", "Aviso", MessageBoxButton.OK, MessageBoxImage.Warning);
+            return;
+        }
+        
+        // Mostrar pantalla de cobro
+        MostrarPantallaCobro();
+    }
+    
+    private void btnReimprimirTicket_Click(object sender, RoutedEventArgs e)
+    {
+        try
+        {
+            // Buscar la última venta completada
+            var ultimaVenta = _context.Ventas
+                .Where(v => v.Observaciones != "En espera" && v.Observaciones != "En edición")
+                .OrderByDescending(v => v.Id)
+                .FirstOrDefault();
+                
+            if (ultimaVenta == null)
+            {
+                MessageBox.Show("No hay ventas completadas para reimprimir.", "Información", MessageBoxButton.OK, MessageBoxImage.Information);
+                return;
+            }
+            
+            // Aquí implementarías la reimpresión del ticket
+            MessageBox.Show($"Reimpresión del ticket de venta #{ultimaVenta.Id} \nTotal: ${ultimaVenta.Total:#,##0}", 
+                "Reimpresión de Ticket", MessageBoxButton.OK, MessageBoxImage.Information);
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show($"Error al reimprimir ticket: {ex.Message}", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
+            txtStatus.Text = $"Error: {ex.Message}";
+        }
+    }
+    
+    private void btnVentasDelDia_Click(object sender, RoutedEventArgs e)
+    {
+        try
+        {
+            var ventasDelDiaWindow = new Windows.VentasDelDiaWindow
+            {
+                Owner = this,
+                WindowStartupLocation = WindowStartupLocation.CenterOwner
+            };
+            
+            ventasDelDiaWindow.ShowDialog();
+            txtStatus.Text = "Ventana de ventas del día cerrada";
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show($"Error al abrir ventana de ventas del día: {ex.Message}", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
+            txtStatus.Text = $"Error: {ex.Message}";
+        }
+    }
+    
+    private void BuscarProductoParaVenta()
+    {
+        string codigo = txtBuscarVentaProducto.Text.Trim();
+        if (string.IsNullOrEmpty(codigo)) return;
+        
+        var producto = _ventasViewModel.BuscarProducto(codigo);
+        
+        if (producto != null)
+        {
+            _ventasViewModel.AgregarItemCommand.Execute(producto);
+            txtBuscarVentaProducto.Clear();
+            
+            // Seleccionar el ítem en el DataGrid para que sea visible
+            if (_ventasViewModel.ItemSeleccionado != null)
+            {
+                dgVentaItems.SelectedItem = _ventasViewModel.ItemSeleccionado;
+                dgVentaItems.ScrollIntoView(_ventasViewModel.ItemSeleccionado);
+            }
+            
+            // Devolver el foco al campo de búsqueda para permitir escaneo continuo
+            txtBuscarVentaProducto.Focus();
+        }
+        else
+        {
+            MessageBox.Show($"No se encontró un producto con el código '{codigo}'", "Producto no encontrado", 
+                           MessageBoxButton.OK, MessageBoxImage.Information);
+            // Mantener el foco en el campo de búsqueda
+            txtBuscarVentaProducto.Focus();
+        }
+    }
+    
+    private void BuscarProductoModal()
+    {
+        try
+        {
+            var buscadorWindow = new Windows.BuscadorProductosWindow
+            {
+                Owner = this,
+                WindowStartupLocation = WindowStartupLocation.CenterOwner
+            };
+            
+            // Configurar para que al seleccionar un producto lo agregue a la venta
+            buscadorWindow.ProductoSeleccionado += (s, producto) =>
+            {
+                if (producto != null)
+                {
+                    _ventasViewModel.AgregarItemCommand.Execute(producto);
+                    
+                    // Seleccionar el ítem en el DataGrid para que sea visible
+                    if (_ventasViewModel.ItemSeleccionado != null)
+                    {
+                        dgVentaItems.SelectedItem = _ventasViewModel.ItemSeleccionado;
+                        dgVentaItems.ScrollIntoView(_ventasViewModel.ItemSeleccionado);
+                    }
+                }
+            };
+            
+            // Asegurarse de que la ventana es modal
+            buscadorWindow.ShowDialog();
+            txtStatus.Text = "Búsqueda de productos completada";
+            
+            // Devolver el foco al campo de búsqueda después de cerrar la ventana modal
+            txtBuscarVentaProducto.Focus();
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show($"Error al abrir ventana de búsqueda de productos: {ex.Message}", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
+            txtStatus.Text = $"Error: {ex.Message}";
+        }
+    }
+    
+    private void MostrarSelectorClientes()
+    {
+        try
+        {
+            var clientesWindow = new Windows.ClientesWindow
+            {
+                Owner = this,
+                WindowStartupLocation = WindowStartupLocation.CenterOwner,
+                Title = "Seleccionar Cliente",
+                Height = 600,
+                Width = 800
+            };
+            
+            // Configurar para que al seleccionar un cliente lo asigne a la venta
+            clientesWindow.ClienteSeleccionado += (s, cliente) =>
+            {
+                if (cliente != null)
+                {
+                    _ventasViewModel.ClienteSeleccionado = cliente;
+                    // Actualizar el TextBlock con el nombre del cliente
+                    txtClienteSeleccionado.Text = cliente.Nombre;
+                    // Automáticamente marcar como factura cuando se selecciona un cliente
+                    chkEsFactura.IsChecked = true;
+                    _ventasViewModel.EsFactura = true;
+                    txtStatus.Text = $"Cliente seleccionado: {cliente.Nombre}";
+                    clientesWindow.Close();
+                }
+            };
+            
+            // Asegurarse de que la ventana es modal
+            clientesWindow.ShowDialog();
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show($"Error al abrir ventana de clientes: {ex.Message}", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
+            txtStatus.Text = $"Error: {ex.Message}";
+        }
+    }
+    
+    private void MostrarVentasEnEspera()
+    {
+        // Recargar ventas en espera
+        _ventasViewModel.CargarVentasEnEspera();
+        
+        if (_ventasViewModel.VentasEnEspera.Count == 0)
+        {
+            MessageBox.Show("No hay ventas en espera.", "Información", MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
+        
+        // Crear ventana para mostrar ventas en espera
+        var ventasEnEsperaWindow = new Window
+        {
+            Owner = this,
+            Title = "Ventas en Espera",
+            Width = 500,
+            Height = 400,
+            WindowStartupLocation = WindowStartupLocation.CenterOwner,
+            ResizeMode = ResizeMode.NoResize
+        };
+        
+        // Crear contenido
+        var grid = new Grid();
+        grid.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
+        grid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+        
+        // Lista de ventas
+        var listView = new ListView
+        {
+            Margin = new Thickness(10),
+            ItemsSource = _ventasViewModel.VentasEnEspera
+        };
+        
+        listView.View = new GridView
+        {
+            Columns =
+            {
+                new GridViewColumn
+                {
+                    Header = "ID",
+                    DisplayMemberBinding = new System.Windows.Data.Binding("Id"),
+                    Width = 50
+                },
+                new GridViewColumn
+                {
+                    Header = "Cliente",
+                    DisplayMemberBinding = new System.Windows.Data.Binding("Cliente.Nombre"),
+                    Width = 150
+                },
+                new GridViewColumn
+                {
+                    Header = "Fecha",
+                    DisplayMemberBinding = new System.Windows.Data.Binding("Fecha"),
+                    Width = 150
+                },
+                new GridViewColumn
+                {
+                    Header = "Total",
+                    DisplayMemberBinding = new System.Windows.Data.Binding("Total") { StringFormat = "C0" },
+                    Width = 100
+                }
+            }
+        };
+        
+        Grid.SetRow(listView, 0);
+        grid.Children.Add(listView);
+        
+        // Botones
+        var buttonsPanel = new StackPanel
+        {
+            Orientation = Orientation.Horizontal,
+            HorizontalAlignment = HorizontalAlignment.Center,
+            Margin = new Thickness(10)
+        };
+        
+        var btnSeleccionar = new Button
+        {
+            Content = "Seleccionar",
+            Width = 100,
+            Margin = new Thickness(5),
+            IsDefault = true
+        };
+        
+        var btnCancelar = new Button
+        {
+            Content = "Cancelar",
+            Width = 100,
+            Margin = new Thickness(5),
+            IsCancel = true
+        };
+        
+        buttonsPanel.Children.Add(btnSeleccionar);
+        buttonsPanel.Children.Add(btnCancelar);
+        
+        Grid.SetRow(buttonsPanel, 1);
+        grid.Children.Add(buttonsPanel);
+        
+        ventasEnEsperaWindow.Content = grid;
+        
+        // Eventos
+        btnSeleccionar.Click += (s, e) =>
+        {
+            if (listView.SelectedItem is Venta ventaSeleccionada)
+            {
+                _ventasViewModel.RecuperarVentaCommand.Execute(ventaSeleccionada);
+                ventasEnEsperaWindow.DialogResult = true;
+            }
+            else
+            {
+                MessageBox.Show("Por favor, seleccione una venta", "Información", MessageBoxButton.OK, MessageBoxImage.Information);
+            }
+        };
+        
+        ventasEnEsperaWindow.ShowDialog();
+    }
+    
+    #endregion
+
+    #region Eventos de Productos
+    
+    private void txtBuscarProd_TextChanged(object sender, TextChangedEventArgs e)
+    {
+        Sprint3_Productos.FiltrarProductos(_productos, ref _productosFiltrados, txtBuscarProd.Text, dgProductos, txtStatus, txtProductCount);
+    }
+    
+    private void btnNuevoProd_Click(object sender, RoutedEventArgs e)
+    {
+        Sprint3_Productos.CrearNuevoProducto(_context, ref _productos, ref _productosFiltrados, dgProductos, txtStatus, txtProductCount, this);
+    }
+    
+    private void btnEditarProd_Click(object sender, RoutedEventArgs e)
+    {
+        Sprint3_Productos.EditarProductoSeleccionado(_context, _productos, ref _productosFiltrados, dgProductos, txtStatus, txtProductCount, this);
+    }
+    
+    private void btnEliminarProd_Click(object sender, RoutedEventArgs e)
+    {
+        Sprint3_Productos.EliminarProductoSeleccionado(_context, _productos, ref _productosFiltrados, dgProductos, txtStatus, txtProductCount);
+    }
+    
+    private void btnRefrescarProd_Click(object sender, RoutedEventArgs e)
+    {
+        Sprint3_Productos.CargarProductos(_context, ref _productos, ref _productosFiltrados, dgProductos, txtStatus, txtProductCount);
+    }
+    
+    private void btnImportarExcelProd_Click(object sender, RoutedEventArgs e)
+    {
+        Sprint3_Productos.ImportarProductosDesdeExcel(_context, ref _productos, ref _productosFiltrados, dgProductos, txtStatus, txtProductCount);
+    }
+    
+    private void dgProductos_MouseDoubleClick(object sender, MouseButtonEventArgs e)
+    {
+        Sprint3_Productos.EditarProductoSeleccionado(_context, _productos, ref _productosFiltrados, dgProductos, txtStatus, txtProductCount, this);
+    }
+    
+    #endregion
+    
+    #region Eventos de Clientes
+    
+    private void txtBuscarCliente_TextChanged(object sender, TextChangedEventArgs e)
+    {
+        Sprint1_Clientes.FiltrarClientes(_clientes, ref _clientesFiltrados, txtBuscarCliente.Text, dgClientes, txtStatus, txtClienteCount);
+    }
+    
+    private void btnNuevoCliente_Click(object sender, RoutedEventArgs e)
+    {
+        Sprint1_Clientes.CrearNuevoCliente(_context, ref _clientes, ref _clientesFiltrados, dgClientes, txtStatus, txtClienteCount, this);
+    }
+    
+    private void btnEditarCliente_Click(object sender, RoutedEventArgs e)
+    {
+        Sprint1_Clientes.EditarClienteSeleccionado(_context, _clientes, ref _clientesFiltrados, dgClientes, txtStatus, txtClienteCount, this);
+    }
+    
+    private void btnEliminarCliente_Click(object sender, RoutedEventArgs e)
+    {
+        Sprint1_Clientes.EliminarClienteSeleccionado(_context, _clientes, ref _clientesFiltrados, dgClientes, txtStatus, txtClienteCount);
+    }
+    
+    private void btnRefrescarCliente_Click(object sender, RoutedEventArgs e)
+    {
+        Sprint1_Clientes.CargarClientes(_context, ref _clientes, ref _clientesFiltrados, dgClientes, txtStatus, txtClienteCount);
+    }
+    
+    private void btnImportarExcelCliente_Click(object sender, RoutedEventArgs e)
+    {
+        Sprint1_Clientes.ImportarClientes(_context, ref _clientes, ref _clientesFiltrados, dgClientes, txtStatus, txtClienteCount);
+    }
+    
+    private void dgClientes_MouseDoubleClick(object sender, MouseButtonEventArgs e)
+    {
+        Sprint1_Clientes.EditarClienteSeleccionado(_context, _clientes, ref _clientesFiltrados, dgClientes, txtStatus, txtClienteCount, this);
+    }
+    
+    private void btnHistorial_Click(object sender, RoutedEventArgs e)
+    {
+        Button btn = sender as Button;
+        Sprint1_Clientes.MostrarHistorialCliente(btn, txtStatus, this);
+    }
+    
+    #endregion
+
+    private void MostrarPantallaCobro()
+    {
+        if (_ventasViewModel.Items.Count == 0)
+        {
+            MessageBox.Show("No hay productos en la venta", "Aviso", MessageBoxButton.OK, MessageBoxImage.Warning);
+            return;
+        }
+
+        try
+        {
+            // Crear la ventana de pago
+            _paymentWindow = new Window
+            {
+                Title = "Venta de Productos: Cobrar",
+                Width = 700,
+                Height = 500,
+                WindowStartupLocation = WindowStartupLocation.CenterOwner,
+                Owner = this,
+                ResizeMode = ResizeMode.NoResize,
+                WindowStyle = WindowStyle.ToolWindow
+            };
+
+            // Crear el contenido principal de la ventana
+            Grid mainGrid = new Grid();
+            
+            // Definir filas y columnas
+            mainGrid.RowDefinitions.Add(new RowDefinition { Height = new GridLength(40) });  // Título
+            mainGrid.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });  // Contenido principal
+            mainGrid.RowDefinitions.Add(new RowDefinition { Height = new GridLength(80) });  // Footer con pagado/cambio
+            
+            mainGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(2, GridUnitType.Star) });  // Área principal
+            mainGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });  // Área de botones
+            
+            // Área de título (COBRAR)
+            Border headerBorder = new Border
+            {
+                Background = new System.Windows.Media.LinearGradientBrush(
+                    System.Windows.Media.Colors.RoyalBlue,
+                    System.Windows.Media.Colors.LightSkyBlue,
+                    new System.Windows.Point(0, 0),
+                    new System.Windows.Point(1, 0)
+                )
+            };
+            
+            TextBlock headerText = new TextBlock
+            {
+                Text = "COBRAR",
+                FontSize = 20,
+                FontWeight = FontWeights.Bold,
+                Foreground = System.Windows.Media.Brushes.White,
+                VerticalAlignment = VerticalAlignment.Center,
+                Margin = new Thickness(15, 0, 0, 0)
+            };
+            
+            headerBorder.Child = headerText;
+            
+            Grid.SetRow(headerBorder, 0);
+            Grid.SetColumnSpan(headerBorder, 2);
+            mainGrid.Children.Add(headerBorder);
+            
+            // Área principal de cobro
+            Grid paymentGrid = new Grid();
+            paymentGrid.Margin = new Thickness(20);
+            
+            // Mostrar el monto total en grande
+            TextBlock totalAmountText = new TextBlock
+            {
+                Text = string.Format("${0:N0}", _ventasViewModel.Total),
+                FontSize = 60,
+                FontFamily = new System.Windows.Media.FontFamily("Arial"),
+                HorizontalAlignment = HorizontalAlignment.Center,
+                VerticalAlignment = VerticalAlignment.Top,
+                Foreground = System.Windows.Media.Brushes.Blue,
+                Margin = new Thickness(0, 20, 0, 0)
+            };
+            
+            paymentGrid.Children.Add(totalAmountText);
+            
+            // Agregar opciones de pago
+            StackPanel paymentOptions = new StackPanel
+            {
+                Orientation = Orientation.Horizontal,
+                HorizontalAlignment = HorizontalAlignment.Center,
+                VerticalAlignment = VerticalAlignment.Center
+            };
+            
+            // Botón de efectivo - Eliminar la imagen que causa problemas
+            Button cashButton = new Button
+            {
+                Width = 80,
+                Height = 80,
+                Margin = new Thickness(10),
+                Content = new TextBlock
+                {
+                    Text = "EFECTIVO",
+                    HorizontalAlignment = HorizontalAlignment.Center,
+                    VerticalAlignment = VerticalAlignment.Center,
+                    TextAlignment = TextAlignment.Center,
+                    TextWrapping = TextWrapping.Wrap
+                }
+            };
+            
+            cashButton.Click += (s, e) => { SeleccionarFormaPago("Efectivo"); };
+            
+            paymentOptions.Children.Add(cashButton);
+            
+            paymentGrid.Children.Add(paymentOptions);
+            
+            // Campos de pago
+            Grid paymentFields = new Grid();
+            paymentFields.VerticalAlignment = VerticalAlignment.Bottom;
+            paymentFields.Margin = new Thickness(0, 0, 0, 20);
+            
+            paymentFields.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+            paymentFields.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+            
+            paymentFields.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            paymentFields.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+            
+            // Pagó Con:
+            TextBlock paidLabel = new TextBlock
+            {
+                Text = "Pagó Con:",
+                FontSize = 16,
+                FontWeight = FontWeights.Bold,
+                VerticalAlignment = VerticalAlignment.Center,
+                HorizontalAlignment = HorizontalAlignment.Right,
+                Margin = new Thickness(0, 0, 10, 0)
+            };
+            
+            Grid.SetRow(paidLabel, 0);
+            Grid.SetColumn(paidLabel, 0);
+            paymentFields.Children.Add(paidLabel);
+            
+            TextBox paidAmount = new TextBox
+            {
+                FontSize = 16,
+                Width = 200,
+                Padding = new Thickness(5),
+                Text = string.Format("${0:N0}", _ventasViewModel.Total),
+                HorizontalContentAlignment = HorizontalAlignment.Right
+            };
+            
+            Grid.SetRow(paidAmount, 0);
+            Grid.SetColumn(paidAmount, 1);
+            paymentFields.Children.Add(paidAmount);
+            
+            // Su Cambio:
+            TextBlock changeLabel = new TextBlock
+            {
+                Text = "Su Cambio:",
+                FontSize = 16,
+                FontWeight = FontWeights.Bold,
+                VerticalAlignment = VerticalAlignment.Center,
+                HorizontalAlignment = HorizontalAlignment.Right,
+                Margin = new Thickness(0, 10, 10, 0)
+            };
+            
+            Grid.SetRow(changeLabel, 1);
+            Grid.SetColumn(changeLabel, 0);
+            paymentFields.Children.Add(changeLabel);
+            
+            TextBlock changeAmount = new TextBlock
+            {
+                FontSize = 16,
+                Padding = new Thickness(5),
+                Text = "$0",
+                HorizontalAlignment = HorizontalAlignment.Right,
+                Margin = new Thickness(0, 10, 0, 0)
+            };
+            
+            Grid.SetRow(changeAmount, 1);
+            Grid.SetColumn(changeAmount, 1);
+            paymentFields.Children.Add(changeAmount);
+            
+            // Manejar cambios en el monto pagado
+            paidAmount.TextChanged += (s, e) =>
+            {
+                try
+                {
+                    string cleanInput = paidAmount.Text.Replace("$", "").Replace(".", "").Replace(",", "");
+                    if (decimal.TryParse(cleanInput, out decimal paid))
+                    {
+                        decimal change = paid - _ventasViewModel.Total;
+                        changeAmount.Text = change >= 0 ? string.Format("${0:N0}", change) : "$0";
+                    }
+                }
+                catch
+                {
+                    changeAmount.Text = "$0";
+                }
+            };
+            
+            paymentGrid.Children.Add(paymentFields);
+            
+            Grid.SetRow(paymentGrid, 1);
+            Grid.SetColumn(paymentGrid, 0);
+            mainGrid.Children.Add(paymentGrid);
+            
+            // Área de botones
+            StackPanel buttonPanel = new StackPanel
+            {
+                Margin = new Thickness(10)
+            };
+            
+            // F1 - Cobrar e Imprimir - Simplificar el botón para evitar problemas
+            Button printButton = new Button
+            {
+                Content = "F1 - Cobrar e Imprimir",
+                Height = 40,
+                Margin = new Thickness(0, 10, 0, 0)
+            };
+            
+            printButton.Click += (s, e) => ConfirmarVentaConImpresion();
+            buttonPanel.Children.Add(printButton);
+            
+            // F2 - Cobrar sin imprimir - Simplificar el botón para evitar problemas
+            Button noPrintButton = new Button
+            {
+                Content = "F2 - Cobrar sin imprimir",
+                Height = 40,
+                Margin = new Thickness(0, 10, 0, 0)
+            };
+            
+            noPrintButton.Click += (s, e) => ConfirmarVentaSinImpresion();
+            buttonPanel.Children.Add(noPrintButton);
+            
+            // ESC - Cancelar - Simplificar el botón para evitar problemas
+            Button cancelButton = new Button
+            {
+                Content = "ESC - Cancelar",
+                Height = 40,
+                Margin = new Thickness(0, 10, 0, 0)
+            };
+            
+            cancelButton.Click += (s, e) => CerrarPantallaCobro();
+            buttonPanel.Children.Add(cancelButton);
+            
+            // F4 - Ingresar notas - Simplificar el botón para evitar problemas
+            Button notesButton = new Button
+            {
+                Content = "F4 - Ingresar notas",
+                Height = 40,
+                Margin = new Thickness(0, 10, 0, 0)
+            };
+            
+            buttonPanel.Children.Add(notesButton);
+            
+            // Mostrar total de artículos
+            TextBlock totalItems = new TextBlock
+            {
+                Text = "Total de Artículos:",
+                FontWeight = FontWeights.Bold,
+                Margin = new Thickness(0, 30, 0, 0),
+                HorizontalAlignment = HorizontalAlignment.Center
+            };
+            
+            buttonPanel.Children.Add(totalItems);
+            
+            TextBlock itemsCount = new TextBlock
+            {
+                Text = _ventasViewModel.Items.Count.ToString(),
+                FontSize = 24,
+                FontWeight = FontWeights.Bold,
+                Foreground = System.Windows.Media.Brushes.Blue,
+                HorizontalAlignment = HorizontalAlignment.Center
+            };
+            
+            buttonPanel.Children.Add(itemsCount);
+            
+            Grid.SetRow(buttonPanel, 1);
+            Grid.SetColumn(buttonPanel, 1);
+            mainGrid.Children.Add(buttonPanel);
+            
+            // Establecer el contenido y mostrar la ventana
+            _paymentWindow.Content = mainGrid;
+            _isInPaymentScreen = true;
+            
+            // Agregar manejo de teclas para la ventana de pago
+            _paymentWindow.PreviewKeyDown += (s, e) => 
+            {
+                if (e.Key == Key.F1)
+                {
+                    ConfirmarVentaConImpresion();
+                    e.Handled = true;
+                }
+                else if (e.Key == Key.F2)
+                {
+                    ConfirmarVentaSinImpresion();
+                    e.Handled = true;
+                }
+                else if (e.Key == Key.Escape)
+                {
+                    CerrarPantallaCobro();
+                    e.Handled = true;
+                }
+                else if (e.Key == Key.F4)
+                {
+                    // Ingresar notas (funcionalidad futura)
+                    e.Handled = true;
+                }
+            };
+            
+            _paymentWindow.ShowDialog();
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show($"Error al mostrar la pantalla de cobro: {ex.Message}", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
+        }
+    }
+    
+    private void SeleccionarFormaPago(string formaPago)
+    {
+        // Esta función sería para seleccionar diferentes formas de pago
+        // Por ahora solo manejamos efectivo
+    }
+    
+    private void ConfirmarVentaConImpresion()
+    {
+        ConfirmarVenta(true);
+    }
+    
+    private void ConfirmarVentaSinImpresion()
+    {
+        ConfirmarVenta(false);
+    }
+    
+    private void ConfirmarVenta(bool imprimir)
+    {
+        if (_ventasViewModel.Items.Count == 0)
+        {
+            MessageBox.Show("No hay productos en la venta", "Aviso", MessageBoxButton.OK, MessageBoxImage.Warning);
+            return;
+        }
+        
+        try
+        {
+            // Procesar la venta usando el método sin transacciones
+            bool resultado = _ventasViewModel.ProcesarVentaFinal();
+            
+            if (resultado)
+            {
+                // Si se activa la impresión, aquí iría el código para imprimir el ticket
+                // pero NO mostramos ningún mensaje de confirmación, ni siquiera sobre impresión
+                
+                // Limpiar venta actual
+                _ventasViewModel.LimpiarVentaCommand.Execute(null);
+                
+                // Cerrar ventana de pago
+                CerrarPantallaCobro();
+                
+                // Asegurarnos de que la vista de ventas está visible y lista
+                ShowVentasContent();
+            }
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show($"Error al procesar la venta: {ex.Message}", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
+        }
+    }
+    
+    private void CerrarPantallaCobro()
+    {
+        if (_paymentWindow != null)
+        {
+            _paymentWindow.Close();
+            _paymentWindow = null;
+            _isInPaymentScreen = false;
+        }
+    }
+}
