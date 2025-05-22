@@ -1,0 +1,259 @@
+using System;
+using System.Drawing;
+using System.Drawing.Printing;
+using System.Runtime.InteropServices;
+using System.IO;
+using System.Text;
+using System.Windows;
+using System.Collections.Generic;
+using FerreteriaPOS.UI.ViewModels;
+
+namespace FerreteriaPOS.UI.Printing
+{
+    /// <summary>
+    /// Servicio de impresión utilizando APIs nativas de Windows
+    /// </summary>
+    public static class WindowsPrinterService
+    {
+        #region Imports PInvoke
+        
+        [DllImport("winspool.drv", EntryPoint = "OpenPrinterA", SetLastError = true, CharSet = CharSet.Ansi, ExactSpelling = true, CallingConvention = CallingConvention.StdCall)]
+        private static extern bool OpenPrinter(string pPrinterName, out IntPtr phPrinter, IntPtr pDefault);
+
+        [DllImport("winspool.drv", EntryPoint = "ClosePrinter", SetLastError = true, ExactSpelling = true, CallingConvention = CallingConvention.StdCall)]
+        private static extern bool ClosePrinter(IntPtr hPrinter);
+
+        [DllImport("winspool.drv", EntryPoint = "StartDocPrinterA", SetLastError = true, CharSet = CharSet.Ansi, ExactSpelling = true, CallingConvention = CallingConvention.StdCall)]
+        private static extern bool StartDocPrinter(IntPtr hPrinter, int Level, ref DOCINFOA pDocInfo);
+
+        [DllImport("winspool.drv", EntryPoint = "EndDocPrinter", SetLastError = true, ExactSpelling = true, CallingConvention = CallingConvention.StdCall)]
+        private static extern bool EndDocPrinter(IntPtr hPrinter);
+
+        [DllImport("winspool.drv", EntryPoint = "StartPagePrinter", SetLastError = true, ExactSpelling = true, CallingConvention = CallingConvention.StdCall)]
+        private static extern bool StartPagePrinter(IntPtr hPrinter);
+
+        [DllImport("winspool.drv", EntryPoint = "EndPagePrinter", SetLastError = true, ExactSpelling = true, CallingConvention = CallingConvention.StdCall)]
+        private static extern bool EndPagePrinter(IntPtr hPrinter);
+
+        [DllImport("winspool.drv", EntryPoint = "WritePrinter", SetLastError = true, ExactSpelling = true, CallingConvention = CallingConvention.StdCall)]
+        private static extern bool WritePrinter(IntPtr hPrinter, IntPtr pBytes, int dwCount, out int dwWritten);
+
+        // Estructura para información del documento
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Ansi)]
+        private struct DOCINFOA
+        {
+            [MarshalAs(UnmanagedType.LPStr)]
+            public string pDocName;
+            [MarshalAs(UnmanagedType.LPStr)]
+            public string pOutputFile;
+            [MarshalAs(UnmanagedType.LPStr)]
+            public string pDataType;
+        }
+        
+        #endregion
+        
+        /// <summary>
+        /// Imprime un ticket de prueba usando impresoras del sistema Windows
+        /// </summary>
+        /// <param name="printerName">Nombre de la impresora</param>
+        /// <returns>True si la impresión fue exitosa</returns>
+        public static bool PrintTestTicket(string printerName)
+        {
+            try
+            {
+                PrintDocument pd = new PrintDocument();
+                pd.PrinterSettings.PrinterName = printerName;
+                
+                if (!pd.PrinterSettings.IsValid)
+                {
+                    MessageBox.Show($"La impresora '{printerName}' no es válida o no está disponible.", 
+                        "Error de impresora", MessageBoxButton.OK, MessageBoxImage.Error);
+                    return false;
+                }
+                
+                pd.DefaultPageSettings.Margins = new Margins(0, 0, 0, 0);
+                
+                // Configurar evento de impresión
+                pd.PrintPage += (sender, e) =>
+                {
+                    // Dibujar texto en la página de impresión
+                    var font = new System.Drawing.Font("Courier New", 10, System.Drawing.FontStyle.Regular);
+                    var titleFont = new System.Drawing.Font("Courier New", 12, System.Drawing.FontStyle.Bold);
+                    
+                    int y = 10;
+                    int leftMargin = 10;
+                    
+                    // Titulo
+                    e.Graphics.DrawString("PRUEBA DE IMPRESION", titleFont, System.Drawing.Brushes.Black, leftMargin, y);
+                    y += 25;
+                    
+                    // Datos de la empresa
+                    e.Graphics.DrawString("Ferretería Las Naciones", font, System.Drawing.Brushes.Black, leftMargin, y);
+                    y += 20;
+                    
+                    // Fecha y hora
+                    e.Graphics.DrawString($"Fecha: {DateTime.Now.ToString("dd/MM/yyyy HH:mm")}", font, System.Drawing.Brushes.Black, leftMargin, y);
+                    y += 30;
+                    
+                    // Mensaje
+                    e.Graphics.DrawString("Esta es una prueba de impresión.", font, System.Drawing.Brushes.Black, leftMargin, y);
+                    y += 20;
+                    e.Graphics.DrawString("Si puede leer este mensaje,", font, System.Drawing.Brushes.Black, leftMargin, y);
+                    y += 20;
+                    e.Graphics.DrawString("la impresora está configurada correctamente.", font, System.Drawing.Brushes.Black, leftMargin, y);
+                    y += 30;
+                    
+                    // Línea de separación
+                    e.Graphics.DrawString("================================", font, System.Drawing.Brushes.Black, leftMargin, y);
+                    y += 20;
+                    
+                    // Fin
+                    e.Graphics.DrawString("GRACIAS POR SU PREFERENCIA", font, System.Drawing.Brushes.Black, leftMargin, y);
+                };
+                
+                // Imprimir documento
+                pd.Print();
+                return true;
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show($"Error al imprimir: {ex.Message}", "Error de impresión", MessageBoxButton.OK, MessageBoxImage.Error);
+                return false;
+            }
+        }
+        
+        /// <summary>
+        /// Imprime un ticket de venta con los datos proporcionados
+        /// </summary>
+        /// <param name="printerName">Nombre de la impresora</param>
+        /// <param name="storeName">Nombre de la tienda</param>
+        /// <param name="items">Lista de ítems de la venta</param>
+        /// <param name="total">Total de la venta</param>
+        /// <param name="subtotal">Subtotal de la venta</param>
+        /// <param name="iva">IVA de la venta</param>
+        /// <param name="footerMessage">Mensaje de pie de página</param>
+        /// <returns>True si la impresión fue exitosa</returns>
+        public static bool ImprimirTicketVenta(string printerName, string storeName, IEnumerable<FerreteriaPOS.UI.ViewModels.VentaItemViewModel> items, 
+            decimal total, decimal subtotal, decimal iva, string footerMessage = "GRACIAS POR SU COMPRA")
+        {
+            try
+            {
+                // Por compatibilidad con impresoras problemáticas, usamos el método de impresión más confiable
+                using (PrintDocument pd = new PrintDocument())
+                {
+                    pd.PrinterSettings.PrinterName = printerName;
+                    
+                    // Verificar si la impresora existe
+                    if (!pd.PrinterSettings.IsValid)
+                    {
+                        return false;
+                    }
+                    
+                    // Configurar página para ticket
+                    pd.DefaultPageSettings.PaperSize = new PaperSize("Custom", 300, 2000);
+                    pd.DefaultPageSettings.Margins = new Margins(2, 2, 2, 2);
+                    
+                    // Manejar el evento de impresión
+                    pd.PrintPage += (sender, e) =>
+                    {
+                        // Dibujar texto en la página de impresión
+                        var font = new System.Drawing.Font("Courier New", 10, System.Drawing.FontStyle.Regular);
+                        var titleFont = new System.Drawing.Font("Courier New", 12, System.Drawing.FontStyle.Bold);
+                        var smallFont = new System.Drawing.Font("Courier New", 8, System.Drawing.FontStyle.Regular);
+                        
+                        int y = 10;
+                        int leftMargin = 10;
+                        int width = 270;
+                        
+                        // ENCABEZADO
+                        // Título
+                        string title = storeName.ToUpper();
+                        e.Graphics.DrawString(title, titleFont, System.Drawing.Brushes.Black, 
+                            new System.Drawing.Rectangle(leftMargin, y, width, 30), 
+                            new StringFormat { Alignment = StringAlignment.Center });
+                        y += 25;
+                        
+                        // Fecha y hora
+                        string dateTime = DateTime.Now.ToString("dd/MM/yyyy HH:mm:ss");
+                        e.Graphics.DrawString(dateTime, font, System.Drawing.Brushes.Black, 
+                            new System.Drawing.Rectangle(leftMargin, y, width, 20), 
+                            new StringFormat { Alignment = StringAlignment.Center });
+                        y += 25;
+                        
+                        // Línea separadora
+                        e.Graphics.DrawString(new string('-', 40), font, System.Drawing.Brushes.Black, leftMargin, y);
+                        y += 15;
+                        
+                        // ITEMS DE LA VENTA
+                        e.Graphics.DrawString("CANT  DESCRIPCION         PRECIO   TOTAL", smallFont, System.Drawing.Brushes.Black, leftMargin, y);
+                        y += 15;
+                        
+                        e.Graphics.DrawString(new string('-', 40), font, System.Drawing.Brushes.Black, leftMargin, y);
+                        y += 15;
+                        
+                        // Escribir cada ítem
+                        foreach (var item in items)
+                        {
+                            // Formato: CANT  DESCRIPCION     PRECIO   TOTAL
+                            string cantidad = item.Cantidad.ToString("0.##");
+                            string precio = item.PrecioUnitario.ToString("N0");
+                            string subtotalItem = item.Subtotal.ToString("N0");
+                            
+                            // Truncar o ajustar descripción para que quepa
+                            string descripcion = item.Producto.Descripcion;
+                            if (descripcion.Length > 18)
+                            {
+                                descripcion = descripcion.Substring(0, 15) + "...";
+                            }
+                            
+                            string line = $"{cantidad.PadRight(5)} {descripcion.PadRight(18)} {precio.PadLeft(7)} {subtotalItem.PadLeft(7)}";
+                            e.Graphics.DrawString(line, smallFont, System.Drawing.Brushes.Black, leftMargin, y);
+                            y += 15;
+                        }
+                        
+                        // Línea separadora
+                        e.Graphics.DrawString(new string('-', 40), font, System.Drawing.Brushes.Black, leftMargin, y);
+                        y += 15;
+                        
+                        // TOTALES
+                        // Subtotal
+                        string subtotalLine = $"SUBTOTAL: {subtotal.ToString("N0").PadLeft(10)}";
+                        e.Graphics.DrawString(subtotalLine, font, System.Drawing.Brushes.Black, 
+                            new System.Drawing.Rectangle(leftMargin, y, width, 20), 
+                            new StringFormat { Alignment = StringAlignment.Far });
+                        y += 15;
+                        
+                        // IVA
+                        string ivaLine = $"IVA 19%: {iva.ToString("N0").PadLeft(10)}";
+                        e.Graphics.DrawString(ivaLine, font, System.Drawing.Brushes.Black, 
+                            new System.Drawing.Rectangle(leftMargin, y, width, 20), 
+                            new StringFormat { Alignment = StringAlignment.Far });
+                        y += 15;
+                        
+                        // Total
+                        string totalLine = $"TOTAL: {total.ToString("N0").PadLeft(10)}";
+                        e.Graphics.DrawString(totalLine, titleFont, System.Drawing.Brushes.Black, 
+                            new System.Drawing.Rectangle(leftMargin, y, width, 20), 
+                            new StringFormat { Alignment = StringAlignment.Far });
+                        y += 25;
+                        
+                        // Mensaje de pie
+                        e.Graphics.DrawString(footerMessage, font, System.Drawing.Brushes.Black, 
+                            new System.Drawing.Rectangle(leftMargin, y, width, 20), 
+                            new StringFormat { Alignment = StringAlignment.Center });
+                        y += 30;
+                    };
+                    
+                    // Imprimir el documento
+                    pd.Print();
+                    return true;
+                }
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show($"Error al imprimir ticket de venta: {ex.Message}", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
+                return false;
+            }
+        }
+    }
+} 
